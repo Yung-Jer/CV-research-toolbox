@@ -473,6 +473,15 @@ def normalize_image(img):
     # cv2.CV_8U         - output will be an 8-bit unsigned integer image, with pixel values ranging from 0 to 255.
     return cv2.normalize(img, None, 0, RANGE_MAX, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
+# normalize the log of image pixel values back to range [0, RANGE_MAX] using linear scaling
+def log_normalize_image(img):
+    RANGE_MAX=255
+    # None              - return the output directly
+    # (0, RANGE_MAX)    - the range of pixel values
+    # cv2.NORM_MINMIAX  - normalization is done using minimum-maximum scaling
+    # cv2.CV_8U         - output will be an 8-bit unsigned integer image, with pixel values ranging from 0 to 255.
+    return cv2.normalize(np.log(NON_ZERO_FLOAT+img), None, 0, RANGE_MAX, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+
 # random crop an input image to certain size
 def random_crop(img, height=200, width=200):
     assert img.shape[0] >= height, f"crop height must be smaller than image height"
@@ -504,31 +513,40 @@ def is_gray(img):
     """
     Returns if the img is in grayscale
     """
-    if len(img.shape) < 3:
+    if len(img.shape) < 2:
+        return False
+    if len(img.shape) == 2:
         return True
     if img.shape[2]  == 1:
         return True
-    b,g,r = img[:,:,0], img[:,:,1], img[:,:,2]
-    if (b==g).all() and (b==r).all():
-        return True
+    if img.shape[2] == 3:
+        b,g,r = img[:,:,0], img[:,:,1], img[:,:,2]
+        if (b==g).all() and (b==r).all():
+            return True
     return False
 
 # check if an image is represented an 8-bit unsigned integer array or still a filepath 
 def is_path(image):
     return isinstance(image, str)
 
-def fft_preprocess(image):
+# compute 2d Fast Fourier Transform for input image
+def fft_preprocess(img):
     """
     FFT preprocess the image
     """
-    if is_gray(image):
-        f = np.fft.fft2(image)
+    if is_gray(img):
+        # cater for cases which dimensions are (HxWx1)
+        if img.ndim > 2:
+            img = np.squeeze(img, axis=2)        
+        f = np.fft.fft2(img)
         fshift = np.fft.fftshift(f)
     else:
+        assert img.ndim > 2, f"image shape is invalid: {img.shape}"
+        assert img.shape[2] == 3, f"expected img to have 3 channels, but got array with shape {img.shape}"
         fshift = []
         for idx in range(3):
             # Splitting the color image into separate color channels
-            channel = image[..., idx]
+            channel = img[..., idx]
 
             # Applying Fourier transform on each color channel
             fft = np.fft.fft2(channel)
@@ -540,10 +558,14 @@ def fft_preprocess(image):
     magnitude_spectrum = np.abs(fshift)
     return magnitude_spectrum.astype(np.float64)
 
+# compute 2d autocorrelation in spatial domain
 def autocorrelation_2d(img):
     # Shift the image to the origin
     # shifted_image = image - np.mean(image)
     if is_gray(img):
+        # cater for cases which dimensions are (HxWx1)
+        if img.ndim > 2:
+            img = np.squeeze(img, axis=2)
         # Compute the 2D Fourier transform
         fft_image = np.fft.fft2(img)
         # Compute the autocorrelation using the power spectrum
@@ -553,87 +575,124 @@ def autocorrelation_2d(img):
         autocorr /= (autocorr[0, 0] * (img.shape[0] * img.shape[1]))
         # Shift the zero-frequency component to the center
         autocorr = np.fft.fftshift(autocorr)
+        # Drop the imaginary part as numpy computation will leave small decimal error
         return np.real(autocorr)
     else:
+        assert img.ndim > 2, f"image shape is invalid: {img.shape}"
+        assert img.shape[2] == 3, f"expected img to have 3 channels, but got array with shape {img.shape}"
         autocorr = []
         for idx in range(3):
             autocorr.append(autocorrelation_2d(img[...,idx]))
         fshift = np.stack(autocorr, axis=-1)
         return fshift
-
-
-
-def high_pass_fft_filtered(image, cutoff=25):
-    """Performing high-pass fft filtering on the image"""
-    if not is_gray(image):
-        # Splitting the color image into separate color channels
-        temp = []
-        for idx in range(3):
-            channel = image[...,idx]
-            filtered = high_pass_fft_filtered(channel, cutoff)
-            temp.append(filtered)
-        filtered_image = np.stack(temp, axis=-1)
-        return filtered_image
+    
+# compute power spectral density (frequency domain)
+def psd2d(img):
+    if is_gray(img):
+        # cater for cases which dimensions are (HxWx1)
+        if img.ndim > 2:
+            img = np.squeeze(img, axis=2)
+        # Compute the 2D Fourier transform (shifted)
+        fft_image = np.fft.fft2(img)
+        fft_image = np.fft.fftshift(fft_image)
+        # Compute the 2D power spectral density
+        psd = np.abs(fft_image) ** 2
+        return np.real(psd)
     else:
-        f = np.fft.fft2(image)
+        assert img.ndim > 2, f"image shape is invalid: {img.shape}"
+        assert img.shape[2] == 3, f"expected img to have 3 channels, but got array with shape {img.shape}"
+        psd2d_lists = []
+        for idx in range(3):
+            psd2d_lists.append(psd2d(img[...,idx]))
+        psd2d_lists = np.stack(psd2d_lists, axis=-1)
+        return psd2d_lists
+
+
+def high_pass_fft_filtered(img, cutoff=25):
+    """Performing high-pass fft filtering on the image"""
+    if is_gray(img):
+        # cater for cases which dimensions are (HxWx1)
+        if img.ndim > 2:
+            img = np.squeeze(img, axis=2)
+        f = np.fft.fft2(img)
         f_shifted = np.fft.fftshift(f)
-        h, w = image.shape
+        h, w = img.shape
         half_h, half_w = h//2, w//2
         # remove frequencies below cutoff
         f_shifted[half_h-cutoff:half_h+cutoff+1, half_w-cutoff:half_w+cutoff+1] = 0
         f_ishift = np.fft.ifftshift(f_shifted)
         filtered_image = np.fft.ifft2(f_ishift)
         filtered_image = np.abs(filtered_image)
-        return filtered_image
-
-def high_pass_dct_filtered(image, factor=2):
-    """Performing high-pass filtering on the image"""
-    image = image.astype(np.float64)
-    if not is_gray(image):
+        return filtered_image.astype(np.float64)
+    else:
+        assert img.ndim > 2, f"image shape is invalid: {img.shape}"
+        assert img.shape[2] == 3, f"expected img to have 3 channels, but got array with shape {img.shape}"
+        # Splitting the color image into separate color channels
         temp = []
-        # Splitting the color image into separate color channels 
         for idx in range(3):
-            channel = image[...,idx]
-            # Applying Fourier transform on each color channel
-            filtered = high_pass_dct_filtered(channel, factor)
+            channel = img[...,idx]
+            filtered = high_pass_fft_filtered(channel, cutoff)
             temp.append(filtered)
         filtered_image = np.stack(temp, axis=-1)
         return filtered_image
-    else:
+
+def high_pass_dct_filtered(img, factor=2):
+    """Performing high-pass filtering on the image"""
+    img = img.astype(np.float64)
+    if is_gray(img):
+        # cater for cases which dimensions are (HxWx1)
+        if img.ndim > 2:
+            img = np.squeeze(img, axis=2)
         # Apply DCT to the image
         # Convert the image to floating-point data type
-        dct_image = cv2.dct(image)
+        dct_image = cv2.dct(img)
         # Set high-frequency coefficients to zero
         h, w = dct_image.shape
         dct_image[:h//factor, :w//factor] = 0
         # Apply inverse DCT to obtain the modified image
         filtered_image = cv2.idct(dct_image)
         return filtered_image
-
-def low_pass_dct_filtered(image, factor=2):
-    """Performing low-pass filtering on the image"""
-    image = image.astype(np.float64)
-    if not is_gray(image):
+    else:
+        assert img.ndim > 2, f"image shape is invalid: {img.shape}"
+        assert img.shape[2] == 3, f"expected img to have 3 channels, but got array with shape {img.shape}"
         temp = []
         # Splitting the color image into separate color channels 
         for idx in range(3):
-            channel = image[...,idx]
+            channel = img[...,idx]
             # Applying Fourier transform on each color channel
-            filtered = low_pass_dct_filtered(channel, factor)
+            filtered = high_pass_dct_filtered(channel, factor)
             temp.append(filtered)
         filtered_image = np.stack(temp, axis=-1)
         return filtered_image
-    else:
+
+def low_pass_dct_filtered(img, factor=2):
+    """Performing low-pass filtering on the image"""
+    img = img.astype(np.float64)
+    if is_gray(img):
+        # cater for cases which dimensions are (HxWx1)
+        if img.ndim > 2:
+            img = np.squeeze(img, axis=2)
         # Apply DCT to the image
         # Convert the image to floating-point data type
-        dct_image = cv2.dct(image)
+        dct_image = cv2.dct(img)
         # Set high-frequency coefficients to zero
         h, w = dct_image.shape
-        half_h, half_w = h//2, w//2
-        dct_image[half_h:, :] = 0
-        dct_image[:, half_w:] = 0
+        dct_image[h//factor:, :] = 0
+        dct_image[:, w//factor:] = 0
         # Apply inverse DCT to obtain the modified image
         filtered_image = cv2.idct(dct_image)
+        return filtered_image
+    else:
+        assert img.ndim > 2, f"image shape is invalid: {img.shape}"
+        assert img.shape[2] == 3, f"expected img to have 3 channels, but got array with shape {img.shape}"
+        temp = []
+        # Splitting the color image into separate color channels 
+        for idx in range(3):
+            channel = img[...,idx]
+            # Applying Fourier transform on each color channel
+            filtered = high_pass_dct_filtered(channel, factor)
+            temp.append(filtered)
+        filtered_image = np.stack(temp, axis=-1)
         return filtered_image
 
 # apply contrast to images
@@ -662,6 +721,8 @@ def is_std_zero(img):
         return np.std(img)==0
     # rgb
     else:
+        assert img.ndim > 2, f"image shape is invalid: {img.shape}"
+        assert img.shape[2] == 3, f"expected img to have 3 channels, but got array with shape {img.shape}"
         return (np.std(img[:, :, 0])==0 or np.std(img[:, :, 1])==0 or np.std(img[:, :, 2])==0)
 
 '''
@@ -682,10 +743,10 @@ noise_level_model = noise_level_img  # noise level for model
 # model = model.to(device)
 # model.eval()
 
-def dn_cnn_filtered_residual(model, image, n_channels=n_channels):
-    if is_path(image):
-        image = imread_uint(image, n_channels=n_channels)
-    img_L = uint2single(image)
+def dn_cnn_filtered_residual(model, img, n_channels=n_channels):
+    if is_path(img):
+        img = imread_uint(img, n_channels=n_channels)
+    img_L = uint2single(img)
     img_L = single2tensor4(img_L)
     img_L = img_L.to(device)
     img_E = model(img_L)
@@ -701,10 +762,10 @@ nb = 17 # 17 for fixed noise level, 20 for blind
 # model = model.to(device)
 # model.eval()
 
-def dn_cnn_filtered_residual(model, image, n_channels=n_channels):
-    if is_path(image):
-        image = imread_uint(image, n_channels=n_channels)
-    img_L = uint2single(expand_dim(image))
+def dn_cnn_filtered_residual(model, img, n_channels=n_channels):
+    if is_path(img):
+        img = imread_uint(img, n_channels=n_channels)
+    img_L = uint2single(expand_dim(img))
     img_L = single2tensor4(img_L)
     img_L = img_L.to(device)
     img_E = model(img_L)
