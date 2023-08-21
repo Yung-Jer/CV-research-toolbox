@@ -387,7 +387,7 @@ def average_local_correlation(im1, im2, win_size=None):
     vxy = cov_norm * (uxy - ux * uy) # covariance of x and y
 
     num = vxy + 0.5*C2
-    denom = np.sqrt(vx+NON_ZERO_FLOAT) + np.sqrt(vy+NON_ZERO_FLOAT) + 0.5*C2
+    denom = np.sqrt(np.maximum(vx * vy, 0)) + 0.5*C2
 
     S = num / denom
     # to avoid edge effects will ignore filter radius strip around edges
@@ -455,6 +455,7 @@ def azimuthalAverage(image, center=None):
 
     return radial_prof
 
+
 '''
 ########################################## End ##########################################
 '''
@@ -484,8 +485,8 @@ def log_normalize_image(img):
 
 # random crop an input image to certain size
 def random_crop(img, height=200, width=200):
-    assert img.shape[0] >= height, f"crop height must be smaller than image height"
-    assert img.shape[1] >= width, f"crop width must be smaller than image width"
+    height = min(img.shape[0], height)
+    width = min(img.shape[1], width)
     x = random.randint(0, img.shape[1] - width)
     y = random.randint(0, img.shape[0] - height)
     img = img[y:y+height, x:x+width]
@@ -529,7 +530,7 @@ def is_gray(img):
 def is_path(image):
     return isinstance(image, str)
 
-# compute 2d Fast Fourier Transform for input image
+# compute Power Spectrum using Fast Fourier Transform for input image
 def fft_preprocess(img):
     """
     FFT preprocess the image
@@ -639,6 +640,8 @@ def high_pass_fft_filtered(img, cutoff=25):
 def high_pass_dct_filtered(img, factor=2):
     """Performing high-pass filtering on the image"""
     img = img.astype(np.float64)
+    h, w = img.shape[0], img.shape[1]
+    img = img[:h-h%2, :w-w%2]
     if is_gray(img):
         # cater for cases which dimensions are (HxWx1)
         if img.ndim > 2:
@@ -668,6 +671,8 @@ def high_pass_dct_filtered(img, factor=2):
 def low_pass_dct_filtered(img, factor=2):
     """Performing low-pass filtering on the image"""
     img = img.astype(np.float64)
+    h, w = img.shape[0], img.shape[1]
+    img = img[:h-h%2, :w-w%2]
     if is_gray(img):
         # cater for cases which dimensions are (HxWx1)
         if img.ndim > 2:
@@ -696,7 +701,7 @@ def low_pass_dct_filtered(img, factor=2):
         return filtered_image
 
 # apply contrast to images
-def adjust_brightness_contrast(img, perc=50, contrast=1.5, hue=False):
+def adjust_brightness_contrast(img, perc=50, contrast=1.5):
     # Convert the image to a float representation
     img = img.astype(np.float64)
 
@@ -709,7 +714,7 @@ def adjust_brightness_contrast(img, perc=50, contrast=1.5, hue=False):
     img = img * contrast
 
     # Return normalized image
-    return normalize_image(img, hue)
+    return img
 
 # apply hanning window
 def image_windowing(img):
@@ -743,9 +748,9 @@ noise_level_model = noise_level_img  # noise level for model
 # model = model.to(device)
 # model.eval()
 
-def dn_cnn_filtered_residual(model, img, n_channels=n_channels):
+def dncnn_color_blind(model, img, n_channels=3):
     if is_path(img):
-        img = imread_uint(img, n_channels=n_channels)
+        img = imread_uint(img, n_channels=3)
     img_L = uint2single(img)
     img_L = single2tensor4(img_L)
     img_L = img_L.to(device)
@@ -762,9 +767,9 @@ nb = 17 # 17 for fixed noise level, 20 for blind
 # model = model.to(device)
 # model.eval()
 
-def dn_cnn_filtered_residual(model, img, n_channels=n_channels):
+def dncnn_15(model, img, n_channels=1):
     if is_path(img):
-        img = imread_uint(img, n_channels=n_channels)
+        img = imread_uint(img, n_channels=1)
     img_L = uint2single(expand_dim(img))
     img_L = single2tensor4(img_L)
     img_L = img_L.to(device)
